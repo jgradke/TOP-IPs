@@ -22,7 +22,8 @@
 # - Fixed DDoS Target Port resolution & snaplen ordering: 18.8
 # - Added TOP-IP_config.txt parser (defaulting to eno1), fixed -p tier supremacy, forced dumpcap -s 128 global snaplen: 18.9
 # - v19.2: Fixed double counting bug, protocol fallback (IP instead of UDP), added victim source tracking and ASN summary
-REVISION = "19.2"
+# - v19.3: Added regex debug output to diagnose packet capture accuracy issues
+REVISION = "19.3"
 
 # Operational Requirements / Prerequisites (RHEL / Rocky Linux / CentOS):
 # ------------------------------------------------------------------------
@@ -556,6 +557,11 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
     attacker_asn_counts = Counter()
     total_packets = 0
     total_bytes = 0
+    
+    # DEBUG COUNTERS
+    total_lines_read = 0
+    total_matches = 0
+    sample_lines = []
 
     if ipv6_only:
         pattern = re.compile(r"IP6 ([0-9a-fA-F:]+)(?:\.(\d+))? > ([0-9a-fA-F:]+)(?:\.(\d+))?.*length (\d+)")
@@ -624,8 +630,15 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
                 if not line:
                     continue
 
+                total_lines_read += 1
+                
+                # Store first 5 unmatched lines for debugging
                 match = pattern.search(line)
+                if not match and len(sample_lines) < 5:
+                    sample_lines.append(line.strip())
+                
                 if match:
+                    total_matches += 1
                     s_ip = match.group(1)
                     s_port = match.group(2)
                     d_ip = match.group(3)
@@ -710,6 +723,19 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
         if live_tui is None:
             sys.stdout.write("\r" + " " * 80 + "\r")
             print("Capture complete.")
+            # DEBUG OUTPUT
+            print(f"\n{'='*80}")
+            print(f"DEBUG STATS:")
+            print(f"  Total lines read from tcpdump: {total_lines_read}")
+            print(f"  Total regex matches: {total_matches}")
+            if total_lines_read > 0:
+                print(f"  Match rate: {total_matches/total_lines_read*100:.1f}% ({total_lines_read - total_matches} unmatched)")
+            else:
+                print(f"  Match rate: 0% (no lines read)")
+            print(f"\nSample of UNMATCHED lines (first 5):")
+            for i, line in enumerate(sample_lines, 1):
+                print(f"  {i}. {line}")
+            print(f"{'='*80}\n")
 
     finally:
         for p in processes:
