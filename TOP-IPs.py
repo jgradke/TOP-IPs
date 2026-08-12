@@ -21,7 +21,8 @@
 # - Implemented Port Tier Priority: 18.3 - 18.6
 # - Fixed DDoS Target Port resolution & snaplen ordering: 18.8
 # - Added TOP-IP_config.txt parser (defaulting to eno1), fixed -p tier supremacy, forced dumpcap -s 128 global snaplen: 18.9
-REVISION = "19.0"
+# - v19.2: Fixed double counting bug, protocol fallback (IP instead of UDP), added victim source tracking and ASN summary
+REVISION = "19.2"
 
 # Operational Requirements / Prerequisites (RHEL / Rocky Linux / CentOS):
 # ------------------------------------------------------------------------
@@ -436,7 +437,7 @@ def build_dashboard(interfaces_str, duration, bpf, src_p, dst_p, src_b, dst_b, p
 
     return layout
 
-def print_cli_results(src_pkts, dst_pkts, src_bytes, dst_bytes, port_pkts, port_bytes, ip_port_counts, ip_port_bytes, total_pkts, total_bytes, top_n, duration, country_reader, asn_reader):
+def print_cli_results(src_pkts, dst_pkts, src_bytes, dst_bytes, port_pkts, port_bytes, ip_port_counts, ip_port_bytes, victim_source_counts, attacker_asn_counts, total_pkts, total_bytes, top_n, duration, country_reader, asn_reader):
     """Outputs traditional scrolling CLI text results."""
     now = datetime.datetime.now()
     print(f"\n{YELLOW}{BOLD}{now.strftime('%Y-%m-%d %H:%M:%S')}{RESET}")
@@ -465,6 +466,11 @@ def print_cli_results(src_pkts, dst_pkts, src_bytes, dst_bytes, port_pkts, port_
         print(f"\n=== 🚨 DDoS VICTIM TARGET FOCUS ===")
         print(f"Target IP: {top_victim_ip} ({victim_cc} | {victim_asn}) | Traffic Share: {victim_pct:.1f}%")
         print(f"Attack Rate: {victim_pkts:,} pkts ({victim_pps:,.1f} pps) | Throughput: {victim_mbps:.2f} Mbps | Target Ports: {ports_str}")
+
+        if top_victim_ip in victim_source_counts:
+            print("\n--- Top Attack Sources ---")
+            for src_ip, src_count in victim_source_counts[top_victim_ip].most_common(10):
+                print(f"{src_ip:<20} {src_count:>12,d}")
 
     def render_cli_table(title, pkt_data, byte_data):
         print(f"\n--- {title} ---")
@@ -502,6 +508,11 @@ def print_cli_results(src_pkts, dst_pkts, src_bytes, dst_bytes, port_pkts, port_
             vol_str = format_bytes(b_cnt)
             mbps = (b_cnt * 8) / (duration * 1_000_000)
             print(f"{proto_port:<15} {srv:<20} {pkt_count:>12d} {pps:>10.1f} pps {vol_str:>12} {mbps:>10.2f} Mbps")
+
+    if attacker_asn_counts:
+        print("\n--- Top Attacking ASNs ---")
+        for asn_name, asn_count in attacker_asn_counts.most_common(10):
+            print(f"{asn_name:<40} {asn_count:>12,d}")
 
     total_vol_str = format_bytes(total_bytes)
     avg_mbps = (total_bytes * 8) / (duration * 1_000_000)
@@ -541,6 +552,8 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
     port_pkt_counts, port_byte_counts = Counter(), Counter()
     ip_port_counts = defaultdict(Counter)
     ip_port_bytes = defaultdict(Counter)
+    victim_source_counts = defaultdict(Counter)
+    attacker_asn_counts = Counter()
     total_packets = 0
     total_bytes = 0
 
@@ -567,7 +580,7 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
             pass
 
     if not readers:
-        return src_pkt_counts, dst_pkt_counts, src_byte_counts, dst_byte_counts, port_pkt_counts, port_byte_counts, ip_port_counts, ip_port_bytes, total_packets, total_bytes, bpf
+        return src_pkt_counts, dst_pkt_counts, src_byte_counts, dst_byte_counts, port_pkt_counts, port_byte_counts, ip_port_counts, ip_port_bytes, victim_source_counts, attacker_asn_counts, total_packets, total_bytes, bpf
 
     start_time = time.time()
     last_ui_update = 0
@@ -624,6 +637,12 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
                     src_byte_counts[s_ip] += pkt_len
                     dst_byte_counts[d_ip] += pkt_len
 
+                    victim_source_counts[d_ip][s_ip] += 1
+
+                    if ui_args and ui_args.asn_reader:
+                        attacker_asn = get_asn_org(s_ip, ui_args.asn_reader)
+                        attacker_asn_counts[attacker_asn] += 1
+
                     line_lower = line.lower()
 
                     if "flags [" in line_lower:
@@ -631,7 +650,7 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
                     elif "udp" in line_lower:
                         proto = "UDP"
                     else:
-                        proto = "UDP"
+                        proto = "IP"
 
                     #
                     # Victim-aware port selection
@@ -688,9 +707,6 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
                     total_packets += 1
                     total_bytes += pkt_len
 
-                    total_packets += 1
-                    total_bytes += pkt_len
-
         if live_tui is None:
             sys.stdout.write("\r" + " " * 80 + "\r")
             print("Capture complete.")
@@ -699,7 +715,7 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
         for p in processes:
             p.terminate()
 
-    return src_pkt_counts, dst_pkt_counts, src_byte_counts, dst_byte_counts, port_pkt_counts, port_byte_counts, ip_port_counts, ip_port_bytes, total_packets, total_bytes, bpf
+    return src_pkt_counts, dst_pkt_counts, src_byte_counts, dst_byte_counts, port_pkt_counts, port_byte_counts, ip_port_counts, ip_port_bytes, victim_source_counts, attacker_asn_counts, total_packets, total_bytes, bpf
 
 class UIArgs:
     def __init__(self, top, country_reader, asn_reader):
@@ -771,20 +787,20 @@ if __name__ == "__main__":
             print("--------------------------------------------------------------------------------\n")
             
             for dur in ramp_intervals:
-                s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, tot_p, tot_b, _ = capture_and_analyze(
+                s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, vsc, aac, tot_p, tot_b, _ = capture_and_analyze(
                     args.interfaces, dur, DEFAULT_TCPDUMP_CMD, 
                     args.ipv6, filter_string, args.target_destination, args.port,
                     live_tui=None
                 )
-                print_cli_results(s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, tot_p, tot_b, args.top, dur, country_reader, asn_reader)
+                print_cli_results(s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, vsc, aac, tot_p, tot_b, args.top, dur, country_reader, asn_reader)
 
             while True:
-                s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, tot_p, tot_b, _ = capture_and_analyze(
+                s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, vsc, aac, tot_p, tot_b, _ = capture_and_analyze(
                     args.interfaces, target_duration, DEFAULT_TCPDUMP_CMD, 
                     args.ipv6, filter_string, args.target_destination, args.port,
                     live_tui=None
                 )
-                print_cli_results(s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, tot_p, tot_b, args.top, target_duration, country_reader, asn_reader)
+                print_cli_results(s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, vsc, aac, tot_p, tot_b, args.top, target_duration, country_reader, asn_reader)
         else:
             ui_context = UIArgs(args.top, country_reader, asn_reader)
             initial_layout = build_dashboard(interfaces_label, target_duration, "Initializing capture...", Counter(), Counter(), Counter(), Counter(), Counter(), Counter(), defaultdict(Counter), defaultdict(Counter), 0, 0, args.top, country_reader, asn_reader, elapsed_seconds=0, last_updated_time="Initializing...", is_capturing=True, active_pcap_file=pcap_filepath)
@@ -794,7 +810,7 @@ if __name__ == "__main__":
 
             with Live(initial_layout, console=console, refresh_per_second=5, screen=True) as live:
                 for dur in ramp_intervals:
-                    s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, tot_p, tot_b, active_bpf = capture_and_analyze(
+                    s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, vsc, aac, tot_p, tot_b, active_bpf = capture_and_analyze(
                         args.interfaces, dur, DEFAULT_TCPDUMP_CMD, 
                         args.ipv6, filter_string, args.target_destination, args.port,
                         live_tui=live, ui_args=ui_context, last_results=last_data_results,
@@ -814,7 +830,7 @@ if __name__ == "__main__":
                     live.update(final_dashboard)
 
                 while True:
-                    s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, tot_p, tot_b, active_bpf = capture_and_analyze(
+                    s_p, d_p, s_b, d_b, p_p, p_b, ip_p, ip_b, vsc, aac, tot_p, tot_b, active_bpf = capture_and_analyze(
                         args.interfaces, target_duration, DEFAULT_TCPDUMP_CMD, 
                         args.ipv6, filter_string, args.target_destination, args.port,
                         live_tui=live, ui_args=ui_context, last_results=last_data_results,
