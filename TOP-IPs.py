@@ -637,6 +637,7 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
                 if not match and len(sample_lines) < 5:
                     sample_lines.append(line.strip())
                 
+                total_lines_seen += 1
                 if match:
                     total_matches += 1
                     s_ip = match.group(1)
@@ -740,7 +741,11 @@ def capture_and_analyze(interfaces, duration, tcpdump_cmd, ipv6_only, filter_str
     finally:
         for p in processes:
             p.terminate()
-
+    print(
+        f"DEBUG: matched={matched_packets:,} "
+        f"seen={total_lines_seen:,} "
+        f"pct={(matched_packets/total_lines_seen)*100:.1f}%"
+    )
     return src_pkt_counts, dst_pkt_counts, src_byte_counts, dst_byte_counts, port_pkt_counts, port_byte_counts, ip_port_counts, ip_port_bytes, victim_source_counts, attacker_asn_counts, total_packets, total_bytes, bpf
 
 class UIArgs:
