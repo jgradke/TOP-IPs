@@ -531,13 +531,13 @@ def trigger_pcap_dump(interfaces, bpf):
 
     cmd = []
     if dumpcap_bin:
-        cmd = [dumpcap_bin, "-P", "-s", "128", "-a", "duration:15", "-w", pcap_filename]
+        cmd = [dumpcap_bin, "-P", "-nn", "-s", "128", "-a", "duration:15", "-w", pcap_filename]
         for iface in interfaces:
             cmd.extend(["-i", iface])
         if bpf:
             cmd.extend(["-f", bpf])
     else:
-        cmd = [tcpdump_bin, "-s", "128", "-i", interfaces[0], "-G", "15", "-W", "1", "-w", pcap_filename, "-n"]
+        cmd = [tcpdump_bin, "-s", "128", "-i", interfaces[0], "-G", "15", "-W", "1", "-w", pcap_filename, "-nn"]
         if bpf:
             cmd.append(bpf)
 
